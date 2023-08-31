@@ -2980,7 +2980,7 @@ class P4Sync(Command, P4UserMap):
         self.gitStream.flush()
         out = self.gitOutput.readline()
         if self.verbose:
-            print("checkpoint finished: " + out)
+            print("checkpoint finished: " + out.decode())
 
     def isPathWanted(self, path):
         for p in self.cloneExclude:
