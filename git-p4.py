@@ -1307,12 +1307,10 @@ def p4ChangesForPaths(depotPaths, changeRange, requestedBlockSize):
                 die("cannot use --changes-block-size with non-numeric revisions")
             block_size = None
 
-    changes = set()
-
     # Retrieve changes a block at a time, to prevent running
     # into a MaxResults/MaxScanRows error from the server. If
     # we _do_ hit one of those errors, turn down the block size
-
+    returnedChanges = 0
     while True:
         cmd = ['changes']
 
@@ -1346,7 +1344,11 @@ def p4ChangesForPaths(depotPaths, changeRange, requestedBlockSize):
         for entry in reversed(result):
             if 'change' not in entry:
                 continue
-            changes.add(int(entry['change']))
+            if returnedChanges >= self.maxChanges:
+                raise StopIteration()
+            yield int(entry['change'])
+            if returnedChanges == 0:
+                yield int(entry['change'])
 
         if not block_size:
             break
@@ -1356,8 +1358,7 @@ def p4ChangesForPaths(depotPaths, changeRange, requestedBlockSize):
 
         changeStart = end + 1
 
-    changes = sorted(changes)
-    return changes
+
 
 
 def p4PathStartsWith(path, prefix):
@@ -3771,7 +3772,7 @@ class P4Sync(Command, P4UserMap):
         if len(changes) <= 0:
             return False
         firstChange = changes[0]
-        sourceBranch = self.knownBranches[branch]
+        sourceBranch = self.walkParentBranches(branch)
         sourceDepotPath = self.depotPaths[0] + sourceBranch
         sourceRef = self.gitRefForBranch(sourceBranch)
 
@@ -3796,6 +3797,31 @@ class P4Sync(Command, P4UserMap):
                     print("Found parent of %s in commit %s" % (branch, commit))
                 return commit
         return None
+
+    def walkParentBranches(self, branch):
+        # We will later try to find the merge point of a branch and
+        # its parent. Imagine branch 2.0 created off of 1.0, and then
+        # a later branch 1.1 created with the 2.0 branch updated to
+        # point to 1.1. When we try to create 2.0, 1.1 has not been
+        # created yet. We can workaround this by looking at that
+        # branches parents until we find one that has already been
+        # imported to use for the initial merge point
+        branch = self.knownBranches[branch]
+        while (
+            branch in self.knownBranches
+            and self.projectName + branch not in self.p4BranchesInGit
+            and branch not in self.createdBranches
+        ):
+            branch = self.knownBranches[branch]
+        if (
+            self.projectName + branch not in self.p4BranchesInGit
+            and branch not in self.createdBranches
+        ):
+            # If we followed the branch back and still don't have a
+            # valid parent, import this branch as a new origin
+            return ""
+        return branch
+
 
     def importChanges(self, changes, origin_revision=0):
         cnt = 1
@@ -3828,7 +3854,7 @@ class P4Sync(Command, P4UserMap):
 
                         if branch not in self.createdBranches:
                             self.createdBranches.add(branch)
-                            parent = self.knownBranches[branch]
+                            parent = self.walkParentBranches(branch)
                             if parent == branch:
                                 parent = ""
                             else:
@@ -3942,9 +3968,8 @@ class P4Sync(Command, P4UserMap):
             print("IO error details: {}".format(err))
             print(self.gitError.read())
 
-    def importRevisions(self, args, branch_arg_given):
-        changes = []
-
+    def getChanges(self):
+        returnedChanges = 0
         if len(self.changesFile) > 0:
             with open(self.changesFile) as f:
                 output = f.readlines()
@@ -3952,10 +3977,15 @@ class P4Sync(Command, P4UserMap):
             for line in output:
                 changeSet.add(int(line))
 
-            for change in changeSet:
-                changes.append(change)
+            for change in sorted(changeSet):
+                if returnedChanges >= self.maxChanges:
+                    raise StopIteration()
+                yield change
+                if returnedChanges == 0:
+                    yield change
+                returnedChanges += 1
 
-            changes.sort()
+
         else:
             # catch "git p4 sync" with no new branches, in a repo that
             # does not have any existing p4 branches
@@ -3977,10 +4007,11 @@ class P4Sync(Command, P4UserMap):
             if self.verbose:
                 print("Getting p4 changes for %s...%s" % (', '.join(self.depotPaths),
                                                           self.changeRange))
-            changes = p4ChangesForPaths(self.depotPaths, self.changeRange, self.changes_block_size)
+            return p4ChangesForPaths(self.depotPaths, self.changeRange, self.changes_block_size)
 
-            if len(self.maxChanges) > 0:
-                changes = changes[:min(int(self.maxChanges), len(changes))]
+
+    def importRevisions(self, args, branch_arg_given):
+
 
         if len(changes) == 0:
             if not self.silent:
